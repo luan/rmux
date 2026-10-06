@@ -411,7 +411,12 @@ async fn read_pane_output(
                     "pane PTY reader exhausted startup EIO retries before first output"
                 );
             }
-            let _ = pane_output.send_for_generation(generation, Vec::new());
+            let output = pane_output.clone();
+            tokio::task::spawn_blocking(move || output.send_for_generation(generation, Vec::new()))
+                .await
+                .map_err(|error| {
+                    io::Error::other(format!("pane EOF publication failed: {error}"))
+                })?;
             if let Some(callback) = &pane_exit_callback {
                 callback(PaneExitEvent::eof_published(
                     session_name.clone(),
@@ -451,34 +456,35 @@ async fn read_pane_output(
         let read_saturated = batch_reads >= PANE_READ_BATCH_LIMIT;
         let published_bytes = bytes.len();
         let emit_no_bell_alert = activity_alert_throttle.should_emit_no_bell_alert();
-        let replies = if bytes.len() < PANE_BLOCKING_PARSE_MIN_BYTES {
-            publish_pane_bytes(
-                PanePublishContext {
-                    session_name: &session_name,
-                    pane_id,
-                    transcript: &transcript,
-                    pane_output: &pane_output,
-                    generation,
-                    pane_alert_callback: pane_alert_callback.as_ref(),
-                    emit_no_bell_alert,
-                },
-                bytes,
-            )
-        } else {
-            publish_pane_bytes_on_blocking_pool(
-                OwnedPanePublishContext {
-                    session_name: session_name.clone(),
-                    pane_id,
-                    transcript: transcript.clone(),
-                    pane_output: pane_output.clone(),
-                    generation,
-                    pane_alert_callback: pane_alert_callback.clone(),
-                    emit_no_bell_alert,
-                },
-                bytes,
-            )
-            .await?
-        };
+        let replies =
+            if bytes.len() < PANE_BLOCKING_PARSE_MIN_BYTES && !pane_output.has_pipe_subscribers() {
+                publish_pane_bytes(
+                    PanePublishContext {
+                        session_name: &session_name,
+                        pane_id,
+                        transcript: &transcript,
+                        pane_output: &pane_output,
+                        generation,
+                        pane_alert_callback: pane_alert_callback.as_ref(),
+                        emit_no_bell_alert,
+                    },
+                    bytes,
+                )
+            } else {
+                publish_pane_bytes_on_blocking_pool(
+                    OwnedPanePublishContext {
+                        session_name: session_name.clone(),
+                        pane_id,
+                        transcript: transcript.clone(),
+                        pane_output: pane_output.clone(),
+                        generation,
+                        pane_alert_callback: pane_alert_callback.clone(),
+                        emit_no_bell_alert,
+                    },
+                    bytes,
+                )
+                .await?
+            };
         write_parser_replies_to_pane(&pane_reader, replies).await?;
         read_bytes_since_heap_trim = read_bytes_since_heap_trim.saturating_add(published_bytes);
         if read_bytes_since_heap_trim >= PANE_READ_BYTES_BEFORE_HEAP_TRIM {
@@ -869,7 +875,7 @@ async fn publish_pane_bytes_on_blocking_pool(
     context: OwnedPanePublishContext,
     bytes: Vec<u8>,
 ) -> io::Result<Vec<u8>> {
-    if bytes.len() < PANE_BLOCKING_PARSE_MIN_BYTES {
+    if bytes.len() < PANE_BLOCKING_PARSE_MIN_BYTES && !context.pane_output.has_pipe_subscribers() {
         return Ok(publish_pane_bytes(
             PanePublishContext {
                 session_name: &context.session_name,

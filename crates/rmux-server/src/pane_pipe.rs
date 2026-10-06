@@ -1,26 +1,23 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::Stdio;
-#[cfg(windows)]
-use std::sync::Mutex as StdMutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use std::thread::{self, JoinHandle};
 
-use rmux_core::events::OutputCursorItem;
 use rmux_core::PaneId;
 use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use rmux_proto::{RmuxError, SessionName};
 use rmux_pty::PtyMaster;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 #[path = "pane_pipe/process_group.rs"]
 mod process_group;
 use process_group::{wait_for_pipe_child, PipeChildProcessGroup};
 
-use crate::pane_io::{PaneOutputReceiver, PaneOutputSender};
+use crate::pane_io::PaneOutputSender;
 use crate::terminal::TerminalProfile;
 
 #[cfg(test)]
@@ -247,8 +244,6 @@ pub(crate) struct ActivePanePipe {
     stop_tx: watch::Sender<bool>,
     stop_flag: Arc<AtomicBool>,
     process_group: Arc<PipeChildProcessGroup>,
-    #[cfg(windows)]
-    output_abort: Arc<StdMutex<Option<tokio::task::AbortHandle>>>,
 }
 
 impl std::fmt::Debug for ActivePanePipe {
@@ -303,34 +298,23 @@ impl ActivePanePipe {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let pipe_stop_flag = stop_flag.clone();
         let stderr_master = stderr.as_ref().and_then(|_| pane_master.try_clone().ok());
-        let pane_output_rx = stdin.as_ref().map(|_| pane_output.subscribe());
-        #[cfg(windows)]
-        let output_abort = Arc::new(StdMutex::new(None));
-        #[cfg(windows)]
-        let output_abort_for_task = output_abort.clone();
+        let pane_output_rx = stdin.as_ref().map(|_| pane_output.subscribe_pipe());
 
         tokio::spawn(async move {
-            let mut async_tasks = Vec::new();
+            let stdin_stop = Arc::new(AtomicBool::new(false));
             let mut blocking_tasks = Vec::new();
             if let Some(stdin) = stdin {
-                let (pipe_tx, pipe_rx) = mpsc::channel(64);
+                let pipe_rx =
+                    pane_output_rx.expect("stdin pipe must have a pane output subscriber");
+                let stdin_stop_for_thread = Arc::clone(&stdin_stop);
                 spawn_pipe_thread(
                     &mut blocking_tasks,
                     "rmux-pipe-pane-stdin",
                     stop_flag.clone(),
-                    move |stop_flag| forward_pane_bytes_to_pipe(pipe_rx, stdin, stop_flag),
+                    move |stop_flag| {
+                        forward_pane_bytes_to_pipe(pipe_rx, stdin, stop_flag, stdin_stop_for_thread)
+                    },
                 );
-                let output_task = tokio::spawn(forward_pane_output_to_pipe(
-                    stop_rx.clone(),
-                    stop_flag.clone(),
-                    pane_output_rx.expect("stdin pipe must have a pane output subscriber"),
-                    pipe_tx,
-                ));
-                #[cfg(windows)]
-                if let Ok(mut output_abort) = output_abort_for_task.lock() {
-                    *output_abort = Some(output_task.abort_handle());
-                }
-                async_tasks.push(output_task);
             }
             if let Some(stdout) = stdout {
                 spawn_pipe_thread(
@@ -368,10 +352,7 @@ impl ActivePanePipe {
                     result.ok()
                 }
             };
-            for task in async_tasks {
-                task.abort();
-                let _ = task.await;
-            }
+            stdin_stop.store(true, Ordering::SeqCst);
             let cleanup_process_group = Arc::clone(&process_group);
             let _ = tokio::task::spawn_blocking(move || {
                 for task in blocking_tasks {
@@ -392,8 +373,6 @@ impl ActivePanePipe {
             stop_tx,
             stop_flag: pipe_stop_flag,
             process_group: pipe_process_group,
-            #[cfg(windows)]
-            output_abort,
         })
     }
 
@@ -402,12 +381,6 @@ impl ActivePanePipe {
         // This is independent of the child waiter so a descendant that keeps
         // stdout/stderr open after the shell exits cannot strand a forwarder.
         self.process_group.terminate();
-        #[cfg(windows)]
-        if let Ok(mut output_abort) = self.output_abort.lock() {
-            if let Some(output_abort) = output_abort.take() {
-                output_abort.abort();
-            }
-        }
         let _ = self.stop_tx.send(true);
     }
 
@@ -425,48 +398,17 @@ async fn wait_for_pipe_stop(stop_rx: &mut watch::Receiver<bool>) {
     }
 }
 
-async fn forward_pane_output_to_pipe(
-    mut stop_rx: watch::Receiver<bool>,
-    stop_flag: Arc<AtomicBool>,
-    mut pane_output: PaneOutputReceiver,
-    pipe_tx: mpsc::Sender<Vec<u8>>,
-) {
-    loop {
-        if stop_flag.load(Ordering::Relaxed) {
-            break;
-        }
-        tokio::select! {
-            biased;
-            _ = wait_for_pipe_stop(&mut stop_rx) => break,
-            next = pane_output.recv() => {
-                match next {
-                    OutputCursorItem::Event(event) => {
-                        if stop_flag.load(Ordering::Relaxed) || *stop_rx.borrow() {
-                            break;
-                        }
-                        let bytes = event.into_bytes();
-                        if bytes.is_empty() {
-                            break;
-                        }
-                        if pipe_tx.send(bytes).await.is_err() {
-                            break;
-                        }
-                    }
-                    OutputCursorItem::Gap(_) => continue,
-                }
-            }
-        }
-    }
-}
-
 fn forward_pane_bytes_to_pipe(
-    mut pipe_rx: mpsc::Receiver<Vec<u8>>,
+    pipe_rx: std::sync::mpsc::Receiver<Arc<[u8]>>,
     mut stdin: std::process::ChildStdin,
     stop_flag: Arc<AtomicBool>,
+    stdin_stop: Arc<AtomicBool>,
 ) {
-    while !stop_flag.load(Ordering::Relaxed) {
-        let Some(bytes) = pipe_rx.blocking_recv() else {
-            break;
+    while !stop_flag.load(Ordering::Relaxed) && !stdin_stop.load(Ordering::Relaxed) {
+        let bytes = match pipe_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(bytes) => bytes,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };
         if bytes.is_empty() || stdin.write_all(&bytes).is_err() {
             break;

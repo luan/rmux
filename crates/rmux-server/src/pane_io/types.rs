@@ -344,6 +344,8 @@ struct PaneOutputInner {
     receiver_count: AtomicUsize,
     fast_receiver_count: AtomicUsize,
     fast_receivers: Mutex<Vec<mpsc::Sender<FastPaneOutput>>>,
+    pipe_receivers: Mutex<Vec<Arc<std::sync::mpsc::SyncSender<Arc<[u8]>>>>>,
+    pipe_publish: Mutex<()>,
     notify: Notify,
     #[cfg(test)]
     fast_send_pause: Mutex<Option<Arc<FastSendPause>>>,
@@ -607,6 +609,60 @@ impl std::fmt::Debug for PaneOutputReceiver {
 }
 
 impl PaneOutputSender {
+    // A pipe consumes exact bytes, so it cannot recover from an overwritten ring cursor.
+    // Bound each subscriber to 1 MiB and propagate pressure to the PTY reader.
+    pub(crate) fn subscribe_pipe(&self) -> std::sync::mpsc::Receiver<Arc<[u8]>> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(64);
+        self.inner
+            .pipe_receivers
+            .lock()
+            .expect("pipe subscribers mutex")
+            .push(Arc::new(sender));
+        receiver
+    }
+
+    pub(crate) fn has_pipe_subscribers(&self) -> bool {
+        !self
+            .inner
+            .pipe_receivers
+            .lock()
+            .expect("pipe subscribers mutex")
+            .is_empty()
+    }
+
+    fn send_pipe_bytes(&self, bytes: &Arc<[u8]>) {
+        let receivers = self
+            .inner
+            .pipe_receivers
+            .lock()
+            .expect("pipe subscribers mutex")
+            .clone();
+        let mut disconnected = Vec::new();
+        for receiver in receivers {
+            let accepted = if bytes.is_empty() {
+                receiver.send(Arc::clone(bytes)).is_ok()
+            } else {
+                bytes
+                    .chunks(16 * 1024)
+                    .all(|chunk| receiver.send(Arc::from(chunk)).is_ok())
+            };
+            if !accepted {
+                disconnected.push(receiver);
+            }
+        }
+        if !disconnected.is_empty() {
+            self.inner
+                .pipe_receivers
+                .lock()
+                .expect("pipe subscribers mutex")
+                .retain(|receiver| {
+                    !disconnected
+                        .iter()
+                        .any(|closed| Arc::ptr_eq(receiver, closed))
+                });
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn receiver_count_for_test(&self) -> usize {
         self.inner.receiver_count.load(Ordering::Acquire)
@@ -660,6 +716,12 @@ impl PaneOutputSender {
         )
             -> (R, Vec<TerminalPassthrough>, Option<PaneInvalidationReason>),
     ) -> Option<(u64, R)> {
+        let pipe_order = self
+            .inner
+            .pipe_publish
+            .lock()
+            .expect("pipe publication mutex");
+        let bytes: Arc<[u8]> = bytes.into();
         let fast_receiver_count = self.inner.fast_receiver_count.load(Ordering::Acquire);
         let (sequence, result, fast_bytes, fast_epoch) = {
             let mut state = self
@@ -672,12 +734,11 @@ impl PaneOutputSender {
             }
             let (result, passthroughs, invalidation) = build_side_effects(&bytes);
             let retain_passthroughs = self.inner.receiver_count.load(Ordering::Acquire) > 0;
-            let bytes: Arc<[u8]> = bytes.into();
             let fast_bytes = invalidation
                 .is_none()
                 .then(|| fast_output_candidate(fast_receiver_count, &bytes, &passthroughs))
                 .flatten();
-            let sequence = state.push(bytes, passthroughs, true, retain_passthroughs);
+            let sequence = state.push(Arc::clone(&bytes), passthroughs, true, retain_passthroughs);
             if let Some(reason) = invalidation {
                 state.invalidate(reason);
                 self.inner.fast_epoch.fetch_add(1, Ordering::AcqRel);
@@ -685,6 +746,8 @@ impl PaneOutputSender {
             let fast_epoch = self.inner.fast_epoch.load(Ordering::Acquire);
             (sequence, result, fast_bytes, fast_epoch)
         };
+        self.send_pipe_bytes(&bytes);
+        drop(pipe_order);
         #[cfg(test)]
         self.pause_before_fast_send();
         let fast_delivered = fast_bytes
@@ -964,6 +1027,12 @@ impl PaneOutputSender {
         bytes: Vec<u8>,
         passthroughs: Vec<TerminalPassthrough>,
     ) -> Option<u64> {
+        let pipe_order = self
+            .inner
+            .pipe_publish
+            .lock()
+            .expect("pipe publication mutex");
+        let bytes: Arc<[u8]> = bytes.into();
         let fast_receiver_count = self.inner.fast_receiver_count.load(Ordering::Acquire);
         let (sequence, fast_bytes, fast_epoch) = {
             let mut state = self
@@ -975,12 +1044,13 @@ impl PaneOutputSender {
                 return None;
             }
             let retain_passthroughs = self.inner.receiver_count.load(Ordering::Acquire) > 0;
-            let bytes: Arc<[u8]> = bytes.into();
             let fast_bytes = fast_output_candidate(fast_receiver_count, &bytes, &passthroughs);
-            let sequence = state.push(bytes, passthroughs, true, retain_passthroughs);
+            let sequence = state.push(Arc::clone(&bytes), passthroughs, true, retain_passthroughs);
             let fast_epoch = self.inner.fast_epoch.load(Ordering::Acquire);
             (sequence, fast_bytes, fast_epoch)
         };
+        self.send_pipe_bytes(&bytes);
+        drop(pipe_order);
         #[cfg(test)]
         self.pause_before_fast_send();
         let fast_delivered = fast_bytes
@@ -1365,6 +1435,8 @@ pub(crate) fn pane_output_channel_with_limits(
             receiver_count: AtomicUsize::new(0),
             fast_receiver_count: AtomicUsize::new(0),
             fast_receivers: Mutex::new(Vec::new()),
+            pipe_receivers: Mutex::new(Vec::new()),
+            pipe_publish: Mutex::new(()),
             notify: Notify::new(),
             #[cfg(test)]
             fast_send_pause: Mutex::new(None),
