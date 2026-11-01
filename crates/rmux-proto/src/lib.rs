@@ -7,6 +7,7 @@ pub mod attach;
 pub mod capabilities;
 pub mod codec;
 pub mod control;
+pub mod default_colors;
 pub mod envelope;
 pub mod error;
 pub mod frame_kind;
@@ -14,6 +15,8 @@ pub mod identity;
 pub mod request;
 pub mod response;
 pub mod types;
+
+pub use default_colors::{TerminalDefaultColors, TERMINAL_DEFAULT_COLORS_OPTION};
 
 pub use attach::{
     decode_attach_data_frame, decode_attach_data_frame_with_limit, encode_attach_data,
@@ -35,7 +38,8 @@ pub use capabilities::{
     CAPABILITY_SDK_PANE_SURFACE_STREAM, CAPABILITY_SDK_PROCESS_COMMAND,
     CAPABILITY_SDK_SESSION_LEASE, CAPABILITY_SDK_SESSION_LEASE_BY_ID,
     CAPABILITY_SDK_SESSION_LEASE_BY_ID_V2, CAPABILITY_SDK_WAITS, CAPABILITY_SDK_WAITS_ARMED,
-    CAPABILITY_TARGET_CLIENT_COMMANDS, CAPABILITY_WEB_SHARE, SUPPORTED_CAPABILITIES,
+    CAPABILITY_TARGET_CLIENT_COMMANDS, CAPABILITY_TERMINAL_DEFAULT_COLORS, CAPABILITY_WEB_SHARE,
+    SUPPORTED_CAPABILITIES,
 };
 #[cfg(feature = "fuzzing")]
 pub use codec::fuzz_detached_frame_decoder;

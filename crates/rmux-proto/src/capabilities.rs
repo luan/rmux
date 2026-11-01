@@ -72,8 +72,12 @@ pub const CAPABILITY_CLI_LIST_WINDOWS_ALL_QUEUE: &str = "commands.cli_list_windo
 /// listener enabled rather than by the protocol baseline capability list.
 pub const CAPABILITY_WEB_SHARE: &str = "web.share";
 
+/// Pane-local terminal host defaults for ordered OSC 10/11/12 query replies.
+pub const CAPABILITY_TERMINAL_DEFAULT_COLORS: &str = "terminal.default_colors";
+
 /// Capabilities advertised by this protocol build.
 pub const SUPPORTED_CAPABILITIES: &[&str] = &[
+    CAPABILITY_TERMINAL_DEFAULT_COLORS,
     CAPABILITY_DETACHED_RPC,
     CAPABILITY_HANDSHAKE,
     CAPABILITY_FRAMED_ERRORS,

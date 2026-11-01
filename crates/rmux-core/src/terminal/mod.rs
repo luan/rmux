@@ -215,6 +215,14 @@ impl TerminalParser {
         self.parser.recovery_dynamic_colours_ansi()
     }
 
+    pub(crate) fn set_default_colors(&mut self, colors: Option<rmux_proto::TerminalDefaultColors>) {
+        self.parser.set_default_colors(colors);
+    }
+
+    pub(crate) fn default_colors(&self) -> Option<rmux_proto::TerminalDefaultColors> {
+        self.parser.default_colors()
+    }
+
     pub(crate) fn dynamic_colour(&self, slot: OscColourSlot) -> Option<&str> {
         self.parser.osc_colour(slot)
     }

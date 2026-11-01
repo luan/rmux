@@ -24,6 +24,19 @@ pub(in crate::pane_terminals) struct PaneOutputSpawn {
 }
 
 impl HandlerState {
+    fn retained_default_colors(
+        &self,
+        session_name: &SessionName,
+        pane_id: PaneId,
+    ) -> Option<rmux_proto::TerminalDefaultColors> {
+        self.transcripts
+            .get(session_name)?
+            .get(&pane_id)?
+            .lock()
+            .expect("pane transcript mutex must not be poisoned")
+            .default_colors()
+    }
+
     #[cfg(windows)]
     pub(in crate::pane_terminals) fn insert_pending_pane_output(
         &mut self,
@@ -43,6 +56,7 @@ impl HandlerState {
             let mut transcript = transcript
                 .lock()
                 .expect("pane transcript mutex must not be poisoned");
+            transcript.set_default_colors(self.retained_default_colors(session_name, pane_id));
             transcript.set_utf8_config(Utf8Config::from_options(&self.options));
             transcript.set_input_buffer_limit(self.input_buffer_limit());
             transcript.set_alternate_screen_enabled(
@@ -195,6 +209,7 @@ impl HandlerState {
             let mut transcript = transcript
                 .lock()
                 .expect("pane transcript mutex must not be poisoned");
+            transcript.set_default_colors(self.retained_default_colors(session_name, pane_id));
             transcript.set_utf8_config(Utf8Config::from_options(&self.options));
             transcript.set_input_buffer_limit(self.input_buffer_limit());
             transcript.set_alternate_screen_enabled(
@@ -320,6 +335,7 @@ impl HandlerState {
             let mut transcript = transcript
                 .lock()
                 .expect("pane transcript mutex must not be poisoned");
+            transcript.set_default_colors(self.retained_default_colors(session_name, pane_id));
             transcript.set_utf8_config(Utf8Config::from_options(&self.options));
             transcript.set_input_buffer_limit(self.input_buffer_limit());
             transcript.set_alternate_screen_enabled(

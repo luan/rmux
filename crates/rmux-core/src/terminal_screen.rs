@@ -89,6 +89,17 @@ impl TerminalScreen {
         self.parser.take_recovery_rebase_required()
     }
 
+    /// Sets the host's real palette without changing application-defined OSC colors.
+    pub fn set_default_colors(&mut self, colors: Option<rmux_proto::TerminalDefaultColors>) {
+        self.parser.set_default_colors(colors);
+    }
+
+    /// Returns the configured host palette.
+    #[must_use]
+    pub fn default_colors(&self) -> Option<rmux_proto::TerminalDefaultColors> {
+        self.parser.default_colors()
+    }
+
     /// Returns and drains terminal replies generated while parsing PTY output.
     pub fn take_replies(&mut self) -> Vec<u8> {
         self.parser.take_replies()

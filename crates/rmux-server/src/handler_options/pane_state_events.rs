@@ -31,7 +31,34 @@ pub(super) fn synchronize_pane_option_aliases_for_outcome(
 ) -> Result<(), RmuxError> {
     if outcome.changed {
         if let OptionScopeSelector::Pane(target) = &outcome.scope {
+            let defaults = if outcome.name == rmux_proto::TERMINAL_DEFAULT_COLORS_OPTION {
+                Some(
+                    outcome
+                        .new_explicit
+                        .as_deref()
+                        .map(|value| {
+                            rmux_proto::TerminalDefaultColors::decode(value).ok_or_else(|| {
+                                RmuxError::Message(
+                                    "terminal default colors require three six-digit RGB values"
+                                        .to_owned(),
+                                )
+                            })
+                        })
+                        .transpose()?,
+                )
+            } else {
+                None
+            };
+            let transcript = defaults
+                .map(|_| state.transcript_handle(target))
+                .transpose()?;
             state.synchronize_pane_alias_options_from_target(target)?;
+            if let (Some(defaults), Some(transcript)) = (defaults, transcript) {
+                transcript
+                    .lock()
+                    .expect("pane transcript mutex must not be poisoned")
+                    .set_default_colors(defaults);
+            }
         }
     }
     for related in &outcome.related {

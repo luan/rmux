@@ -122,6 +122,14 @@ impl PaneTranscript {
         Arc::new(Mutex::new(Self::new(limit, size)))
     }
 
+    pub(crate) fn set_default_colors(&mut self, colors: Option<rmux_proto::TerminalDefaultColors>) {
+        self.terminal.set_default_colors(colors);
+    }
+
+    pub(crate) fn default_colors(&self) -> Option<rmux_proto::TerminalDefaultColors> {
+        self.terminal.default_colors()
+    }
+
     pub(crate) fn set_limit(&mut self, limit: usize) {
         self.terminal.screen_mut().set_history_limit(limit);
     }

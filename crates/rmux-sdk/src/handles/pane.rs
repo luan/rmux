@@ -384,6 +384,33 @@ impl Pane {
         set_option(&self.begin_operation_handle(), name.into(), value.into()).await
     }
 
+    /// Supplies real terminal-host colors for ordered OSC queries, or clears them.
+    /// Application-set colors keep precedence and OSC resets return to these defaults.
+    pub async fn set_default_colors(
+        &self,
+        colors: Option<rmux_proto::TerminalDefaultColors>,
+    ) -> Result<PaneOptionMutation> {
+        let pane = self.begin_operation_handle();
+        crate::capabilities::require(
+            pane.transport(),
+            &[rmux_proto::CAPABILITY_TERMINAL_DEFAULT_COLORS],
+        )
+        .await?;
+        match colors {
+            Some(colors) => {
+                set_option(
+                    &pane,
+                    rmux_proto::TERMINAL_DEFAULT_COLORS_OPTION.to_owned(),
+                    colors.encode(),
+                )
+                .await
+            }
+            None => {
+                unset_option(&pane, rmux_proto::TERMINAL_DEFAULT_COLORS_OPTION.to_owned()).await
+            }
+        }
+    }
+
     /// Returns the exact pane-local explicit value for an option.
     pub async fn option(&self, name: impl Into<String>) -> Result<Option<String>> {
         get_option(&self.begin_operation_handle(), name.into()).await

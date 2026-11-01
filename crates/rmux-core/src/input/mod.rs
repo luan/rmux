@@ -153,6 +153,7 @@ pub struct InputParser {
     /// Application-set OSC 10/11/12 colours (fg, bg, cursor). The daemon does
     /// not invent colours for an unknown attached terminal palette.
     osc_colours: [Option<String>; 3],
+    default_colors: Option<rmux_proto::TerminalDefaultColors>,
 }
 
 impl InputParser {
@@ -185,12 +186,42 @@ impl InputParser {
             reply_buf: Vec::new(),
             terminal_passthrough_dropped_count: 0,
             osc_colours: [None, None, None],
+            default_colors: None,
         }
     }
 
     /// Returns an application-defined colour for an OSC 10/11/12 query.
     pub(crate) fn osc_colour(&self, slot: OscColourSlot) -> Option<&str> {
         self.osc_colours[slot.index()].as_deref()
+    }
+
+    pub(crate) fn set_default_colors(&mut self, colors: Option<rmux_proto::TerminalDefaultColors>) {
+        self.default_colors = colors;
+    }
+
+    pub(crate) fn default_colors(&self) -> Option<rmux_proto::TerminalDefaultColors> {
+        self.default_colors
+    }
+
+    pub(crate) fn query_osc_colour(
+        &self,
+        slot: OscColourSlot,
+    ) -> Option<std::borrow::Cow<'_, str>> {
+        if let Some(color) = self.osc_colour(slot) {
+            return Some(std::borrow::Cow::Borrowed(color));
+        }
+        let colors = self.default_colors?;
+        let [r, g, b] = match slot {
+            OscColourSlot::Foreground => colors.foreground,
+            OscColourSlot::Background => colors.background,
+            OscColourSlot::Cursor => colors.cursor,
+        };
+        Some(std::borrow::Cow::Owned(format!(
+            "rgb:{:04x}/{:04x}/{:04x}",
+            u16::from(r) * 257,
+            u16::from(g) * 257,
+            u16::from(b) * 257
+        )))
     }
 
     /// Records an application-set OSC 10/11/12 colour so later queries
