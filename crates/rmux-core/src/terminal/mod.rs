@@ -268,8 +268,10 @@ impl TerminalParser {
     /// current cell attributes.
     pub(crate) fn reset_parser(&mut self) {
         let input_buffer_limit = self.parser.configured_input_buffer_limit();
+        let default_colors = self.parser.default_colors();
         self.parser = InputParser::new();
         self.parser.set_input_buffer_limit(input_buffer_limit);
+        self.parser.set_default_colors(default_colors);
     }
 }
 

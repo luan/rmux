@@ -29,6 +29,9 @@ fn application_colors_override_live_host_defaults_and_reset_to_them() {
         terminal.take_replies(),
         b"\x1b]11;#224466\x1b\\\x1b]11;rgb:0303/0404/0505\x1b\\"
     );
+    terminal.reset_parser();
+    terminal.feed(b"\x1b]11;?\x1b\\");
+    assert_eq!(terminal.take_replies(), b"\x1b]11;rgb:0303/0404/0505\x1b\\");
     terminal.set_default_colors(None);
     terminal.feed(b"\x1b]11;?\x1b\\\x1b[6n");
     assert_eq!(terminal.take_replies(), b"\x1b[1;1R");
